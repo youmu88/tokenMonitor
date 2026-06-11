@@ -1,0 +1,58 @@
+{
+  "taskId": "mq7ub4t1alu9lw",
+  "attachmentBaseDir": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments",
+  "rounds": [
+    {
+      "round": 1,
+      "dir": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments/round1",
+      "files": [
+        {
+          "attachmentId": "att_0b2e646bbe",
+          "originalName": "image.png",
+          "storageName": "image.png",
+          "mimeType": "image/png",
+          "size": 47580,
+          "isImage": true,
+          "path": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments/round1/image.png"
+        },
+        {
+          "attachmentId": "att_bc867230af",
+          "originalName": "image.png",
+          "storageName": "image__att_bc867230af.png",
+          "mimeType": "image/png",
+          "size": 76688,
+          "isImage": true,
+          "path": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments/round1/image__att_bc867230af.png"
+        },
+        {
+          "attachmentId": "att_e7d861eaba",
+          "originalName": "image.png",
+          "storageName": "image__att_e7d861eaba.png",
+          "mimeType": "image/png",
+          "size": 76688,
+          "isImage": true,
+          "path": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments/round1/image__att_e7d861eaba.png"
+        },
+        {
+          "attachmentId": "att_61d0dcb225",
+          "originalName": "image.png",
+          "storageName": "image__att_61d0dcb225.png",
+          "mimeType": "image/png",
+          "size": 71941,
+          "isImage": true,
+          "path": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments/round1/image__att_61d0dcb225.png"
+        },
+        {
+          "attachmentId": "att_b429fc2d07",
+          "originalName": "image.png",
+          "storageName": "image__att_b429fc2d07.png",
+          "mimeType": "image/png",
+          "size": 124454,
+          "isImage": true,
+          "path": "/Users/wilsonwen/.ai-chatAgent/workspace/mq7ub4t1alu9lw/attachments/round1/image__att_b429fc2d07.png"
+        }
+      ]
+    }
+  ],
+  "currentRound": 1
+}
