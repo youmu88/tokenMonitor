@@ -24,7 +24,7 @@ APP_NAME="TokenMonitor"
 if [ -f "$SCRIPT_DIR/VERSION" ]; then
     VERSION="$(cat "$SCRIPT_DIR/VERSION" | tr -d ' \t\n\r')"
 else
-    VERSION="1.2.2"
+    VERSION="1.2.5"
 fi
 
 DIST_DIR="$SCRIPT_DIR/dist"
