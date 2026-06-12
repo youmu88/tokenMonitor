@@ -107,9 +107,9 @@ cat > "$PLIST_PATH" << PLISTEOF
     <key>RunAtLoad</key>
     <true/>
     <key>KeepAlive</key>
-    <true/>
+    <false/>
     <key>ThrottleInterval</key>
-    <integer>10</integer>
+    <integer>60</integer>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
@@ -170,22 +170,10 @@ echo "   - 如需停止: launchctl bootout gui/$(id -u)/${PLIST_NAME}"
 echo "   - 如需打包为 .app: cd $SCRIPT_DIR && source .venv/bin/activate && python setup.py py2app"
 echo ""
 
-# 启动应用（后台运行，不阻塞终端）
-nohup "$VENV_DIR/bin/python" "$SCRIPT_DIR/token_status_app.py" \
-    > "$SCRIPT_DIR/startup.log" 2>&1 &
-APP_PID=$!
-echo "   ✅ 应用已启动 (PID: $APP_PID)"
+# 启动应用：LaunchAgent 已通过 RunAtLoad 启动，避免再 nohup 启动造成双实例。
+echo "   ✅ 应用将由 LaunchAgent 启动"
 echo "   ℹ️  如果这是首次运行，浏览器将自动打开，请登录 OA 系统"
-echo ""
-
-# 验证启动
-sleep 2
-if kill -0 "$APP_PID" 2>/dev/null; then
-    echo "   ✅ 应用运行中"
-else
-    echo "   ⚠ 应用可能已退出，请查看日志: $LOG_FILE"
-    echo "   运行: tail -20 $LOG_FILE"
-fi
+echo "   ℹ️  查看日志: tail -20 $LOG_FILE"
 
 echo ""
 echo "=========================================="

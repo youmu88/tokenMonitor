@@ -126,6 +126,11 @@ class TokenStatusApp(rumps.App):
 
         self.engine = TokenMonitorEngine()
         self.monitoring = False
+        self._fetch_lock = threading.Lock()
+        self._relogin_lock = threading.Lock()
+        self._ui_lock = threading.Lock()
+        self._needs_refresh = False
+        self._notification_queue = []
 
         # 构建菜单
         self._build_menu()
@@ -133,6 +138,9 @@ class TokenStatusApp(rumps.App):
         # 定时器：使用当前设置的刷新间隔
         self.timer = rumps.Timer(self._timer_tick, self._current_interval)
         self.timer.start()
+        # UI 刷新和通知统一由主线程定时器处理，避免后台线程直接操作 Cocoa/rumps。
+        self.ui_timer = rumps.Timer(self._ui_tick, 1)
+        self.ui_timer.start()
 
         log.info("=" * 60)
         log.info("🚀 Token Status App (增强版) 启动")
@@ -150,7 +158,47 @@ class TokenStatusApp(rumps.App):
             threading.Thread(target=self._first_time_setup, daemon=True).start()
         else:
             log.info("检测到已保存的 Cookie/Profile，开始监控...")
-            threading.Thread(target=self._do_fetch, daemon=True).start()
+            self._start_fetch_thread("startup")
+
+    def _notify(self, title: str, subtitle: str = "", message: str = ""):
+        """把通知投递到主线程 UI 定时器执行。"""
+        with self._ui_lock:
+            self._notification_queue.append((title, subtitle, message))
+
+    def _request_refresh(self):
+        """请求主线程刷新状态栏显示。"""
+        with self._ui_lock:
+            self._needs_refresh = True
+
+    def _ui_tick(self, sender):
+        """主线程 UI 定时器：统一处理通知和状态栏刷新。"""
+        with self._ui_lock:
+            notifications = self._notification_queue[:]
+            self._notification_queue.clear()
+            needs_refresh = self._needs_refresh
+            self._needs_refresh = False
+
+        for title, subtitle, message in notifications:
+            rumps.notification(title=title, subtitle=subtitle, message=message)
+        if needs_refresh:
+            self._refresh_display()
+
+    def _start_fetch_thread(self, reason: str = "") -> bool:
+        """启动抓取线程，确保任意时刻只有一个抓取任务。"""
+        if not self._fetch_lock.acquire(blocking=False):
+            log.info(f"跳过抓取：已有抓取任务正在运行 ({reason})")
+            return False
+        self.monitoring = True
+        threading.Thread(target=self._do_fetch_locked, daemon=True).start()
+        return True
+
+    def _do_fetch_locked(self):
+        try:
+            self._do_fetch()
+        finally:
+            self.monitoring = False
+            self._fetch_lock.release()
+            self._request_refresh()
 
     def _build_menu(self):
         """构建菜单"""
@@ -229,8 +277,11 @@ class TokenStatusApp(rumps.App):
 
     def _first_time_setup(self):
         """首次使用：启动登录流程"""
+        if not self._relogin_lock.acquire(blocking=False):
+            log.info("跳过登录流程：已有登录流程正在运行")
+            return
         log.info("首次使用，启动登录流程...")
-        rumps.notification(
+        self._notify(
             title="Token 监控",
             subtitle="首次使用，请完成 OA 登录认证",
             message="浏览器已打开，请在页面中登录 OA 系统",
@@ -242,21 +293,22 @@ class TokenStatusApp(rumps.App):
             if success:
                 log.info("✅ 登录成功，开始监控")
                 self._consecutive_failures = 0  # 重置连续失败计数
-                rumps.notification(
+                self._notify(
                     title="Token 监控",
                     subtitle="✅ 登录成功！",
                     message="开始监控 Token 使用情况",
                 )
-                loop.run_until_complete(self._fetch_and_update())
+                self._start_fetch_thread("post-login")
             else:
                 log.error("❌ 登录失败或超时")
-                rumps.notification(
+                self._notify(
                     title="Token 监控",
                     subtitle="❌ 登录失败",
                     message="请重新启动应用并重试",
                 )
         finally:
             loop.close()
+            self._relogin_lock.release()
 
     def _do_fetch(self):
         """在新线程中执行抓取"""
@@ -300,7 +352,9 @@ class TokenStatusApp(rumps.App):
             # 检查告警阈值
             self._check_alerts(percent)
 
-            log.info(f"✅ 抓取成功 | 已用: {used}/{total} ({percent:.1f}%)")
+            parse_source = result.get("parse_source", "unknown")
+            mode = result.get("mode", "unknown")
+            log.info(f"✅ 抓取成功 | 已用: {used}/{total} ({percent:.1f}%) | source={parse_source} | mode={mode}")
         else:
             self.last_error = result.get("error", "未知错误")
             self._consecutive_failures += 1
@@ -312,15 +366,15 @@ class TokenStatusApp(rumps.App):
             # 检查是否需要自动重新登录
             if self._should_re_login():
                 log.warning("⚠️ 连续失败次数过多或 Cookie 已过期，触发自动重新登录...")
-                rumps.notification(
+                self._notify(
                     title="Token 监控",
                     subtitle="⚠️ 登录状态已失效",
                     message="将自动打开浏览器进行重新登录...",
                 )
                 threading.Thread(target=self._auto_re_login, daemon=True).start()
 
-        # 更新显示
-        self._refresh_display()
+        # 请求主线程更新显示
+        self._request_refresh()
 
     def _should_re_login(self) -> bool:
         """判断是否需要自动重新登录"""
@@ -340,6 +394,9 @@ class TokenStatusApp(rumps.App):
 
     def _auto_re_login(self):
         """自动重新登录"""
+        if not self._relogin_lock.acquire(blocking=False):
+            log.info("跳过自动重新登录：已有重新登录流程正在运行")
+            return
         log.info("🔑 开始自动重新登录流程...")
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
@@ -358,21 +415,22 @@ class TokenStatusApp(rumps.App):
             if success:
                 log.info("✅ 自动重新登录成功")
                 self._consecutive_failures = 0
-                rumps.notification(
+                self._notify(
                     title="Token 监控",
                     subtitle="✅ 自动重新登录成功！",
                     message="已恢复 Token 数据监控",
                 )
-                loop.run_until_complete(self._fetch_and_update())
+                self._start_fetch_thread("post-relogin")
             else:
                 log.error("❌ 自动重新登录失败")
-                rumps.notification(
+                self._notify(
                     title="Token 监控",
                     subtitle="❌ 自动重新登录失败",
                     message="请手动点击「重新登录」按钮重试",
                 )
         finally:
             loop.close()
+            self._relogin_lock.release()
 
     def _refresh_display(self):
         """更新状态栏显示和菜单"""
@@ -443,7 +501,7 @@ class TokenStatusApp(rumps.App):
             self._alerted_high = True
             self._alerted_medium = True  # 高告警覆盖中告警
             log.warning(f"🔴 高告警: Token 使用率 {percent:.1f}% >= {ALERT_THRESHOLD_HIGH}%")
-            rumps.notification(
+            self._notify(
                 title="🔴 Token 使用率告警",
                 subtitle=f"使用率已达 {percent:.1f}%",
                 message=f"已用 {self.used}/{self.total}，请及时关注！",
@@ -451,7 +509,7 @@ class TokenStatusApp(rumps.App):
         elif percent >= ALERT_THRESHOLD_MEDIUM and not self._alerted_medium:
             self._alerted_medium = True
             log.warning(f"⚠️ 中告警: Token 使用率 {percent:.1f}% >= {ALERT_THRESHOLD_MEDIUM}%")
-            rumps.notification(
+            self._notify(
                 title="⚠️ Token 使用率提醒",
                 subtitle=f"使用率已达 {percent:.1f}%",
                 message=f"已用 {self.used}/{self.total}",
@@ -468,8 +526,8 @@ class TokenStatusApp(rumps.App):
             self.title += f" ({detail})"
 
     def _timer_tick(self, sender):
-        """定时器触发（保留给未来扩展）"""
-        pass
+        """定时器回调"""
+        self._start_fetch_thread("timer")
 
     # ============================================================
     # 仪表盘模式切换
@@ -503,7 +561,7 @@ class TokenStatusApp(rumps.App):
         self._refresh_widget_display()
         mode_label = "启用" if self.widget.auto_mode else "关闭"
         log.info(f"📊 自动模式已{mode_label}")
-        rumps.notification(
+        self._notify(
             title="Token 监控",
             subtitle=f"📊 自动模式已{mode_label}",
             message=f"当前使用率: {self.percent:.1f}% → 模式: {self.widget.mode}",
@@ -564,7 +622,7 @@ class TokenStatusApp(rumps.App):
         """手动刷新"""
         log.info("🔄 用户手动触发刷新")
         self._set_menu_title(0, "📊 刷新中...")
-        threading.Thread(target=self._do_fetch, daemon=True).start()
+        self._start_fetch_thread("manual")
 
     @rumps.clicked("📋 查看日志")
     def open_log(self, sender):
