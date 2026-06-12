@@ -547,10 +547,20 @@ class TokenStatusApp(rumps.App):
                 self.widget.data.model_stats = self._model_stats
 
             # 重建仪表盘菜单
+            # ⚠️ 修复卡死问题：clear() 后逐个 add() 会导致 rumps 内部 NSMenu 状态损坏
+            # 改用直接替换整个 _widget_menu 的方式
             menu_items = self.widget.build_menu_items()
-            self._widget_menu.clear()
+            new_menu = rumps.MenuItem("📊 Token 仪表盘", callback=None)
             for item in menu_items:
-                self._widget_menu.add(item)
+                new_menu.add(item)
+            # 找到 _widget_menu 在父菜单中的位置并替换
+            parent = self._widget_menu._menuitem.menu()
+            if parent:
+                index = parent.indexOfItem_(self._widget_menu._menuitem)
+                if index != -1:
+                    parent.removeItemAtIndex_(index)
+                    parent.insertItem_atIndex_(new_menu._menuitem, index)
+            self._widget_menu = new_menu
 
         except Exception as e:
             log.error(f"❌ 刷新仪表盘失败: {e}")

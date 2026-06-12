@@ -19,6 +19,12 @@ v2.3 - 修复 Top 模型无数据问题：
 - token.woa.com 页面使用现代前端框架渲染，DOM 中可能没有 <table> 标签
 - 新增 extract_model_stats_from_text() 从页面文本中直接提取模型数据
 - fetch_token_data() 中当表格解析无结果时，自动 fallback 到文本提取
+
+v2.4 - 新增 __NEXT_DATA__ JSON 解析支持：
+- token.woa.com 使用 Next.js 框架，页面中包含 <script id="__NEXT_DATA__"> 内嵌 JSON
+- 新增 extract_model_stats_from_next_data() 从 __NEXT_DATA__ JSON 中提取模型统计数据
+- 比文本解析更精确，可获取结构化数据（名称、使用量、配额、百分比）
+- fetch_token_data() 中优先使用 __NEXT_DATA__ 提取模型数据
 """
 
 # BUGFIX v2.2: 在 import playwright.async_api 之前，monkey-patch driver 路径
@@ -221,12 +227,18 @@ def extract_model_stats_from_text(page_text):
     lines = page_text.split("\n")
     
     # 常见模型名称关键词（用于识别模型行）
+    # 注意：token.woa.com 页面中的模型名称可能包含空格（如 "Claude Code Internal"）
+    # 以及非标准名称（如 "cron"），因此关键词列表需要覆盖更广
     model_keywords = [
         "gpt", "claude", "gemini", "deepseek", "qwen", "llama", "mistral",
         "glm", "chatglm", "baichuan", "yi-", "moonshot", "kimi", "minimax",
         "ernie", "wenxin", "tongyi", "qianwen", "hunyuan", "doubao",
         "spark", "xinghuo", "sensechat", "step-", "openai", "azure",
         "模型", "model", "应用", "app",
+        # 补充 token.woa.com 实际页面中出现的模型名关键词
+        "cron", "internal", "opus", "sonnet", "haiku", "o1", "o3",
+        "mini", "pro", "flash", "turbo", "reka", "command", "cohere",
+        "nova", "lite", "medium", "large", "xlarge",
     ]
     
     # 先尝试找包含模型名称的行
@@ -256,16 +268,32 @@ def extract_model_stats_from_text(page_text):
             continue
         
         # 跳过明显不是模型数据的行
-        if any(kw in clean.lower() for kw in ["合计", "总计", "汇总", "total", "sum", "全部", "token", "配额"]):
+        # ⚠️ 注意：不要跳过包含"配额"的行，因为模型数据行也包含"配额"字段
+        if any(kw in clean.lower() for kw in ["合计", "总计", "汇总", "total", "sum", "全部"]):
             continue
         
         # 提取模型名称：取行中第一个匹配模型关键词的单词/短语
+        # ⚠️ 修复：模型名称可能包含空格（如 "Claude Code Internal"），
+        # 旧正则只匹配连续字符，会截断名称。改用更宽松的匹配方式。
         name = None
         for kw in model_keywords:
-            match = re.search(r'([A-Za-z0-9_\-.]+' + re.escape(kw) + r'[A-Za-z0-9_\-. ]*)', clean, re.IGNORECASE)
+            # 先尝试匹配包含空格的完整名称（如 "Claude Code Internal"）
+            match = re.search(
+                r'([A-Za-z][A-Za-z0-9_\-. ]*?' + re.escape(kw) + r'[A-Za-z0-9_\-. ]*?)'
+                r'(?:\s*[:：]\s*|\s+[\d]|\s*$|,|\s+[A-Z][a-z]|\s+[A-Z]{2,})',
+                clean, re.IGNORECASE
+            )
             if match:
                 name = match.group(1).strip()
                 break
+        
+        if not name:
+            # 回退：匹配关键词前后连续字符（旧逻辑）
+            for kw in model_keywords:
+                match = re.search(r'([A-Za-z0-9_\-.]+' + re.escape(kw) + r'[A-Za-z0-9_\-. ]*)', clean, re.IGNORECASE)
+                if match:
+                    name = match.group(1).strip()
+                    break
         
         if not name:
             # 尝试更宽松的匹配：取行中第一个看起来像模型名的词（字母开头，含数字或连字符）
@@ -294,11 +322,24 @@ def extract_model_stats_from_text(page_text):
         if pct_match:
             percent = float(pct_match.group(1))
         
-        # 如果只有百分比没有 used/total，尝试从行中提取单个数值作为 used
-        if used is None and percent is None:
-            nums = re.findall(r'(\d[\d,]*)', clean)
-            if nums:
-                used = int(nums[0].replace(',', ''))
+        # 如果只有百分比没有 used/total，尝试从行中提取数值
+        # ⚠️ 修复：即使有百分比，也应该尝试提取 used 和 total
+        # 注意：需要过滤掉模型名称中的数字（如 "GLM-5.1" 中的 "5" 和 "1"）
+        if used is None:
+            # 优先匹配"使用量/配额"等中文标签后的数字
+            usage_match = re.search(r'(?:使用量|用量|已用|used)[：:\s]*([\d,]+)', clean, re.IGNORECASE)
+            quota_match = re.search(r'(?:配额|总量|上限|total|quota)[：:\s]*([\d,]+)', clean, re.IGNORECASE)
+            if usage_match:
+                used = int(usage_match.group(1).replace(',', ''))
+            if quota_match:
+                total = int(quota_match.group(1).replace(',', ''))
+            # 如果没有中文标签，尝试提取大数字（>1000，排除模型版本号）
+            if used is None:
+                nums = re.findall(r'(?<![.\d])(\d{4,}[\d,]*)(?![.\d])', clean)
+                if nums:
+                    used = int(nums[0].replace(',', ''))
+                    if len(nums) >= 2:
+                        total = int(nums[1].replace(',', ''))
         
         # 如果只有 used 没有 total，使用默认总量
         if used is not None and total is None:
@@ -396,6 +437,154 @@ def extract_json_data(page_text):
             except json.JSONDecodeError:
                 continue
     return None
+
+
+def extract_model_stats_from_next_data(page_html):
+    """
+    从 __NEXT_DATA__ JSON 中提取模型使用量统计数据。
+    
+    token.woa.com 使用 Next.js 框架，页面中通常包含
+    <script id="__NEXT_DATA__" type="application/json">...JSON...</script>
+    其中包含完整的结构化数据，包括模型列表、使用量、配额等。
+    
+    返回: List[Dict] 格式为 [{"name": ..., "used": ..., "total": ..., "percent": ...}]
+    """
+    model_stats = []
+    
+    # 提取 __NEXT_DATA__ JSON
+    match = re.search(
+        r'<script\s+id="__NEXT_DATA__"\s+type="application/json"[^>]*>\s*(.*?)\s*</script>',
+        page_html, re.DOTALL
+    )
+    if not match:
+        return model_stats
+    
+    try:
+        data = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return model_stats
+    
+    # 递归搜索包含模型使用量数据的结构
+    def search_model_data(obj, depth=0):
+        """递归搜索模型数据数组"""
+        if depth > 15:
+            return None
+        if not isinstance(obj, (dict, list)):
+            return None
+        
+        if isinstance(obj, dict):
+            # 检查当前对象是否包含模型数据特征
+            # 特征：包含 name/模型名称 + used/使用量 + total/配额 的条目
+            if all(k in obj for k in ["name", "used", "total"]) or \
+               any(k in obj for k in ["modelName", "model_name", "model"]) and \
+               any(k in obj for k in ["used", "consumed", "usage", "callCount"]):
+                return [obj]
+            
+            # 检查是否是模型列表（数组中的每个元素都是模型数据）
+            for key in ["models", "modelList", "modelStats", "modelStatistics",
+                        "appList", "appStats", "applications", "items", "list",
+                        "data", "records", "rows", "quotaList", "quotaItems"]:
+                if key in obj and isinstance(obj[key], list) and len(obj[key]) > 0:
+                    result = search_model_data(obj[key], depth + 1)
+                    if result:
+                        return result
+            
+            # 继续递归搜索所有值
+            for v in obj.values():
+                result = search_model_data(v, depth + 1)
+                if result:
+                    return result
+        
+        elif isinstance(obj, list):
+            # 检查是否是模型数据列表
+            if len(obj) > 0 and isinstance(obj[0], dict):
+                # 检查第一个元素是否有模型数据特征
+                first = obj[0]
+                has_name = any(k in first for k in ["name", "modelName", "model_name", "model", "appName", "app_name"])
+                has_usage = any(k in first for k in ["used", "consumed", "usage", "callCount", "call_count", "usedTokens", "used_tokens"])
+                if has_name and has_usage:
+                    return obj
+            
+            # 递归搜索每个元素
+            for item in obj:
+                result = search_model_data(item, depth + 1)
+                if result:
+                    return result
+        
+        return None
+    
+    model_list = search_model_data(data)
+    if not model_list:
+        return model_stats
+    
+    # 提取模型数据
+    for item in model_list:
+        if not isinstance(item, dict):
+            continue
+        
+        # 提取模型名称
+        name = None
+        for key in ["name", "modelName", "model_name", "model", "appName", "app_name", "title"]:
+            if key in item and isinstance(item[key], str) and len(item[key]) >= 2:
+                name = item[key]
+                break
+        if not name:
+            continue
+        
+        # 跳过汇总行
+        if any(kw in name.lower() for kw in ["合计", "总计", "汇总", "total", "sum", "全部"]):
+            continue
+        
+        # 提取使用量
+        used = None
+        for key in ["used", "consumed", "usage", "callCount", "call_count", "usedTokens", "used_tokens", "usedAmount", "used_amount"]:
+            if key in item and isinstance(item[key], (int, float)):
+                used = int(item[key])
+                break
+        
+        # 提取配额/总量
+        total = None
+        for key in ["total", "quota", "limit", "max", "capacity", "totalTokens", "total_tokens", "quotaAmount", "quota_amount", "maxTokens", "max_tokens"]:
+            if key in item and isinstance(item[key], (int, float)):
+                total = int(item[key])
+                break
+        
+        # 提取百分比
+        percent = None
+        for key in ["percent", "percentage", "usageRate", "usage_rate", "rate", "ratio", "usedPercent", "used_percent"]:
+            if key in item and isinstance(item[key], (int, float)):
+                percent = float(item[key])
+                break
+        
+        # 如果只有 used 没有 total，使用默认总量
+        if used is not None and total is None:
+            total = MAX_TOKEN
+        
+        # 计算百分比
+        if percent is None and used is not None and total is not None and total > 0:
+            percent = round(used / total * 100, 1)
+        
+        # 只保留有足够信息的条目
+        if used is not None or percent is not None:
+            entry = {"name": name}
+            if used is not None:
+                entry["used"] = used
+            if total is not None:
+                entry["total"] = total
+            if percent is not None:
+                entry["percent"] = percent
+            model_stats.append(entry)
+    
+    # 去重（按名称去重，保留第一个出现的）
+    seen_names = set()
+    unique_stats = []
+    for entry in model_stats:
+        name_lower = entry["name"].lower()
+        if name_lower not in seen_names:
+            seen_names.add(name_lower)
+            unique_stats.append(entry)
+    
+    return unique_stats
 
 
 def parse_token_value(text):
@@ -541,17 +730,24 @@ async def fetch_token_data(ctx):
                 all_text = json.dumps(table_rows)
                 result = parse_token_value(all_text)
 
-        # 3. 如果表格解析没有模型数据，尝试从页面文本中直接提取（v2.3 新增）
+        # 3. 尝试从 __NEXT_DATA__ JSON 中提取模型数据（v2.4 新增）
+        #    优先于文本解析，因为 JSON 数据更精确
+        if not model_stats:
+            model_stats = extract_model_stats_from_next_data(page_html)
+            if model_stats:
+                logger.info(f"📊 [v2.4] 从 __NEXT_DATA__ JSON 中提取到 {len(model_stats)} 个模型使用量数据")
+
+        # 4. 如果 JSON 解析没有模型数据，尝试从页面文本中直接提取（v2.3 新增）
         if not model_stats:
             model_stats = extract_model_stats_from_text(page_text)
             if model_stats:
                 logger.info(f"📊 [v2.3] 从页面文本中提取到 {len(model_stats)} 个模型使用量数据")
 
-        # 4. 尝试文本解析
+        # 5. 尝试文本解析
         if not result:
             result = parse_token_value(page_text)
 
-        # 5. 尝试文本行逐行解析
+        # 6. 尝试文本行逐行解析
         if not result:
             text_data = extract_token_data(page_text)
             for line in text_data:
