@@ -81,6 +81,7 @@ logger = logging.getLogger("token_monitor_core")
 # 配置
 # ============================================================
 TARGET_URL = "https://token.woa.com/"
+QUOTA_API_URL = "https://token.woa.com/api/query-quota?platform=codebuddy"
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 COOKIE_FILE = os.path.join(APP_DIR, ".token_monitor_cookies.json")
 # BUGFIX: 使用固定的 profile 目录，而非每次创建临时目录
@@ -582,6 +583,50 @@ def extract_json_data(page_text):
     return None
 
 
+TOKEN_CONTEXT_KEYWORDS = (
+    "token", "配额", "额度", "费用", "使用率", "调用", "次数", "限额", "余量", "已用", "已使用",
+    "剩余", "总量", "总配额", "总限额", "quota", "usage", "used", "limit", "consumed",
+    "remain", "remaining",
+)
+MIN_REASONABLE_TOTAL = 100
+MAX_REASONABLE_PERCENT = 150.0
+
+
+def _has_token_context(text: str) -> bool:
+    lower_text = text.lower()
+    return any(keyword in lower_text for keyword in TOKEN_CONTEXT_KEYWORDS)
+
+
+def _finalize_token_result(used, total=MAX_TOKEN, percentage=None):
+    used = int(float(used))
+    total = int(float(total))
+    if total <= 0 or used < 0:
+        return None
+    if percentage is None:
+        percentage = round(used / total * 100, 1)
+    else:
+        percentage = round(float(percentage), 1)
+    if total < MIN_REASONABLE_TOTAL or percentage < 0 or percentage > MAX_REASONABLE_PERCENT:
+        logger.warning(f"忽略疑似误解析的 Token 数据: used={used}, total={total}, percent={percentage}%")
+        return None
+    return used, total, percentage
+
+
+def parse_quota_api_data(data):
+    """解析 /api/query-quota 返回的真实额度数据。"""
+    if not isinstance(data, dict) or data.get("success") is not True:
+        return None
+
+    used = data.get("total_used")
+    total = data.get("total_quota")
+    percentage = data.get("total_usage_rate")
+    if percentage is None:
+        percentage = data.get("usage_percentage") or data.get("group_usage_rate")
+    if used is None or total is None:
+        return None
+    return _finalize_token_result(used, total, percentage)
+
+
 def extract_model_stats_from_next_data(page_html):
     """
     从 __NEXT_DATA__ JSON 中提取模型使用量统计数据。
@@ -732,108 +777,139 @@ def extract_model_stats_from_next_data(page_html):
 
 def parse_token_value(text):
     """
-    从页面文本中智能解析 token 使用量。
-    支持两种格式：
-    1. 金额格式：¥862.06 / ¥4,060.00  已用 21.2%
-    2. 数字格式：862/4060  或  已用: 862  总量: 4060
+    从页面文本中解析 token/费用使用量。
+    优先识别真实额度卡片中的金额格式，避免把提问内容、日期、分页里的 `6/3` 误判为配额。
     返回 (used, total, percentage) 或 None。
     """
+    if not text:
+        return None
+
+    quota_money_match = re.search(
+        r'已用\s*[¥$]\s*([\d,]+(?:\.\d+)?)\s*/\s*[¥$]\s*([\d,]+(?:\.\d+)?)',
+        text,
+        re.DOTALL,
+    )
+    if quota_money_match:
+        used = quota_money_match.group(1).replace(',', '')
+        total = quota_money_match.group(2).replace(',', '')
+        pct_match = re.search(r'已用\s*([\d.]+)%', text)
+        percentage = float(pct_match.group(1)) if pct_match else None
+        result = _finalize_token_result(used, total, percentage)
+        if result:
+            logger.debug(f"Token 金额卡片解析命中: {quota_money_match.group(0)[:80]}")
+            return result
+
     used = None
     total = MAX_TOKEN
     percentage = None
 
-    # ================================================================
-    # 策略1: 匹配金额格式 "¥862.06 / ¥4,060.00" 或 "已用 ¥862.06"
-    # ================================================================
-    # 匹配 "已用 ¥862.06" 或 "已用 ¥862.06 / ¥4,060.00"
-    money_used_match = re.search(r'已用\s*[¥$]\s*([\d,]+(?:\.\d+)?)', text)
-    if money_used_match:
-        used_str = money_used_match.group(1).replace(',', '')
-        used = float(used_str)
-        # 尝试匹配总额度
-        money_total_match = re.search(r'/\s*[¥$]\s*([\d,]+(?:\.\d+)?)', text)
-        if money_total_match:
-            total_str = money_total_match.group(1).replace(',', '')
-            total = float(total_str)
-        # 尝试匹配百分比 "已用 21.2%" 或 "21.2%"
-        pct_match = re.search(r'已用\s*([\d.]+)%', text)
-        if pct_match:
-            percentage = float(pct_match.group(1))
-        elif total > 0:
-            percentage = round(used / total * 100, 1)
-        # 金额格式的 used/total 可能是浮点数，转为 int（向下取整）
-        used = int(used)
-        total = int(total)
-        return used, total, percentage
-
-    # ================================================================
-    # 策略2: 匹配纯数字格式 "xxx/4060" 或 "xxx / 4060"
-    # ================================================================
-    ratio_match = re.search(r'(\d[\d,]*)\s*/\s*(\d[\d,]*)', text)
-    if ratio_match:
-        used = int(ratio_match.group(1).replace(',', ''))
-        total = int(ratio_match.group(2).replace(',', ''))
-        if total > 0:
-            percentage = round(used / total * 100, 1)
-        return used, total, percentage
-
-    # 尝试匹配 "已用: xxx" 或 "使用: xxx"
-    used_match = re.search(r'(?:已用|使用|已使用|调用次数|消耗)[：:]\s*([\d,]+)', text)
+    used_match = re.search(r'(?:已用|使用|已使用|调用次数|消耗)[：:]?\s*[¥$]?\s*([\d,]+(?:\.\d+)?)', text)
     if used_match:
-        used = int(used_match.group(1).replace(',', ''))
+        used = used_match.group(1).replace(',', '')
 
-    # 尝试匹配 "总量: xxx" 或 "总配额: xxx"
-    total_match = re.search(r'(?:总量|总配额|总限额|总次数|总调用)[：:]\s*([\d,]+)', text)
+    total_match = re.search(r'(?:总量|总配额|总限额|总次数|总调用|限额|额度|配额)[：:]?\s*[¥$]?\s*([\d,]+(?:\.\d+)?)', text)
     if total_match:
-        total = int(total_match.group(1).replace(',', ''))
+        total = total_match.group(1).replace(',', '')
 
-    # 尝试匹配 "使用率: yy%" 或 "yy%"
-    pct_match = re.search(r'(?:使用率|使用比例|占比)[：:]\s*([\d.]+)%', text)
+    pct_match = re.search(r'(?:使用率|使用比例|占比|已用)[：:]?\s*([\d.]+)%', text)
     if pct_match:
         percentage = float(pct_match.group(1))
 
     if used is not None:
-        if percentage is None and total > 0:
-            percentage = round(used / total * 100, 1)
-        return used, total, percentage
+        result = _finalize_token_result(used, total, percentage)
+        if result:
+            return result
+
+    for ratio_match in re.finditer(r'(?<!\d)(\d[\d,]*)\s*/\s*(\d[\d,]*)(?!\d)', text):
+        start, end = ratio_match.span()
+        context = text[max(0, start - 100):min(len(text), end + 100)]
+        if not _has_token_context(context):
+            logger.debug(f"跳过无 Token 上下文的比例片段: {ratio_match.group(0)}")
+            continue
+        result = _finalize_token_result(
+            ratio_match.group(1).replace(',', ''),
+            ratio_match.group(2).replace(',', ''),
+        )
+        if result:
+            logger.debug(f"Token 比例解析命中: {ratio_match.group(0)}")
+            return result
 
     return None
 
 
 def parse_token_from_json(json_data):
-    """从 JSON 数据中递归查找 token 使用量"""
+    """从 JSON 数据中递归查找 token 使用量，避免 value/count/total 等通用字段误判。"""
     if not json_data:
         return None
 
-    used = None
-    total = MAX_TOKEN
+    strict_used_keys = ('used', 'usedTokens', 'used_tokens', 'consumed', 'consumedTokens', 'callCount', 'call_count')
+    contextual_used_keys = strict_used_keys + ('usage', 'current', 'value', 'count')
+    total_keys = ('total', 'totalTokens', 'total_tokens', 'quota', 'limit', 'capacity', 'maxTokens', 'max_tokens')
 
-    def search(obj, depth=0):
-        nonlocal used, total
+    def search(obj, depth=0, path=""):
         if depth > 10:
-            return
+            return None
         if isinstance(obj, dict):
-            for key in ['used', 'usedTokens', 'used_tokens', 'consumed', 'consumedTokens',
-                         'usage', 'current', 'value', 'count', 'callCount', 'call_count']:
-                if key in obj and isinstance(obj[key], (int, float)):
-                    used = int(obj[key])
-                    break
-            for key in ['total', 'totalTokens', 'total_tokens', 'quota', 'limit',
-                         'max', 'capacity', 'maxTokens', 'max_tokens']:
-                if key in obj and isinstance(obj[key], (int, float)):
-                    total = int(obj[key])
-                    break
-            for v in obj.values():
-                search(v, depth + 1)
-        elif isinstance(obj, list):
-            for item in obj:
-                search(item, depth + 1)
+            key_text = " ".join([path, *map(str, obj.keys())]).lower()
+            has_context = any(keyword in key_text for keyword in TOKEN_CONTEXT_KEYWORDS)
+            used_keys = contextual_used_keys if has_context else strict_used_keys
 
-    search(json_data)
-    if used is not None:
-        pct = round(used / total * 100, 1) if total > 0 else 0
-        return used, total, pct
-    return None
+            candidate_used = None
+            candidate_total = MAX_TOKEN
+            for key in used_keys:
+                if key in obj and isinstance(obj[key], (int, float)):
+                    candidate_used = obj[key]
+                    break
+            for key in total_keys:
+                if key in obj and isinstance(obj[key], (int, float)):
+                    candidate_total = obj[key]
+                    break
+
+            if candidate_used is not None:
+                result = _finalize_token_result(candidate_used, candidate_total)
+                if result:
+                    logger.debug(f"JSON Token 解析命中路径: {path or '<root>'}")
+                    return result
+
+            for key, value in obj.items():
+                result = search(value, depth + 1, f"{path}.{key}" if path else str(key))
+                if result:
+                    return result
+        elif isinstance(obj, list):
+            for index, item in enumerate(obj):
+                result = search(item, depth + 1, f"{path}[{index}]")
+                if result:
+                    return result
+        return None
+
+    return search(json_data)
+
+
+async def fetch_quota_api_data(ctx):
+    """优先调用真实额度接口获取数据。"""
+    try:
+        response = await ctx.request.get(QUOTA_API_URL, timeout=30000)
+        if not response.ok:
+            logger.warning(f"额度接口请求失败: HTTP {response.status}")
+            return None
+        data = await response.json()
+        result = parse_quota_api_data(data)
+        if not result:
+            logger.warning("额度接口响应未包含可用额度数据")
+            return None
+        used, total, percentage = result
+        logger.info(f"额度接口解析成功: used={used}, total={total}, percent={percentage}%")
+        return {
+            "success": True,
+            "used": used,
+            "total": total,
+            "percentage": percentage,
+            "parse_source": "quota_api",
+            "raw_json": data,
+        }
+    except Exception as e:
+        logger.warning(f"额度接口调用失败: {e}")
+        return None
 
 
 async def fetch_token_data(ctx):
@@ -843,6 +919,11 @@ async def fetch_token_data(ctx):
     """
     page = None
     try:
+        api_result = await fetch_quota_api_data(ctx)
+        if api_result:
+            api_result["title"] = "Token 看板"
+            return api_result
+
         page = await ctx.new_page()
         page.set_default_timeout(30000)
         await page.goto(TARGET_URL, wait_until="networkidle", timeout=30000)
@@ -852,16 +933,28 @@ async def fetch_token_data(ctx):
         if "passport" in current_url or "signin" in current_url:
             return {"success": False, "error": "未登录", "url": current_url}
 
+        # 部分登录态需要先访问页面后接口才可用，再尝试一次接口。
+        api_result = await fetch_quota_api_data(ctx)
+        if api_result:
+            api_result["title"] = await page.title()
+            return api_result
+
         page_html = await page.content()
         page_text = await page.inner_text("body")
 
-        # 尝试多种解析方式
         result = None
+        parse_source = None
 
-        # 1. 尝试 JSON 解析
-        json_data = extract_json_data(page_html)
-        if json_data:
-            result = parse_token_from_json(json_data)
+        quota_text = await page.evaluate("""
+            () => {
+                const el = document.querySelector('.quota-overview-card');
+                return el ? el.innerText : '';
+            }
+        """)
+        if quota_text:
+            result = parse_token_value(quota_text)
+            if result:
+                parse_source = "quota-overview-card"
 
         # 2. 尝试表格解析（同时提取模型统计数据）
         model_stats = []
@@ -896,6 +989,15 @@ async def fetch_token_data(ctx):
         # 5. 尝试文本解析
         if not result:
             result = parse_token_value(page_text)
+            if result:
+                parse_source = "page_text"
+
+        if not result:
+            json_data = extract_json_data(page_html)
+            if json_data:
+                result = parse_token_from_json(json_data)
+                if result:
+                    parse_source = "json"
 
         # 6. 尝试文本行逐行解析
         if not result:
@@ -903,15 +1005,18 @@ async def fetch_token_data(ctx):
             for line in text_data:
                 result = parse_token_value(line)
                 if result:
+                    parse_source = "keyword_line"
                     break
 
         if result:
             used, total, percentage = result
+            logger.info(f"Token 解析成功: source={parse_source}, used={used}, total={total}, percent={percentage}%")
             return {
                 "success": True,
                 "used": used,
                 "total": total,
                 "percentage": percentage,
+                "parse_source": parse_source,
                 "raw_text": page_text[:500],
                 "title": await page.title(),
                 "model_stats": model_stats,
@@ -1001,16 +1106,17 @@ def has_profile():
 
 
 async def create_browser_context():
-    """创建浏览器上下文（CDP 优先，固定 profile 次之，临时目录兜底）"""
-    # 先尝试 CDP 连接
-    try:
-        p = await async_playwright().start()
-        browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
-        ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
-        logger.info("已通过 CDP 连接到 Chrome")
-        return p, browser, ctx, "cdp"
-    except Exception:
-        pass
+    """创建浏览器上下文（固定 profile 优先，CDP 仅显式开启，临时目录兜底）"""
+    # CDP 会连接用户正在使用的 Chrome，可能造成卡顿或误关闭；默认关闭，仅显式设置环境变量时启用。
+    if os.environ.get("TOKEN_MONITOR_USE_CDP") == "1":
+        try:
+            p = await async_playwright().start()
+            browser = await p.chromium.connect_over_cdp(f"http://127.0.0.1:{CDP_PORT}")
+            ctx = browser.contexts[0] if browser.contexts else await browser.new_context()
+            logger.info("已通过 CDP 连接到 Chrome")
+            return p, browser, ctx, "cdp"
+        except Exception as e:
+            logger.warning(f"CDP 连接失败: {e}，改用独立浏览器上下文")
 
     # BUGFIX v2.1: 优先使用固定的 profile 目录（持久化登录态）
     if has_profile():

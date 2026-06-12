@@ -22,7 +22,7 @@ APP_NAME="TokenMonitor"
 
 # 从 VERSION 文件读取版本号（统一版本管理）
 if [ -f "$SCRIPT_DIR/VERSION" ]; then
-    VERSION="1.2.5"$SCRIPT_DIR/VERSION" | tr -d ' \t\n\r')"
+    VERSION="$(cat "$SCRIPT_DIR/VERSION" | tr -d ' \t\n\r')"
 else
     VERSION="1.2.5"
 fi

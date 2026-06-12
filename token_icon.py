@@ -55,6 +55,8 @@ def create_progress_icon(percent: float, width: int = 22, height: int = 22) -> O
     if not _HAS_PYOBJC:
         return None
 
+    percent = max(0.0, min(100.0, float(percent or 0.0)))
+
     from AppKit import NSImage, NSBezierPath, NSColor, NSMakeRect, NSMakeSize, \
         NSGraphicsContext, NSCompositingOperationSourceOver
 
@@ -144,6 +146,8 @@ def create_simple_icon(percent: float, width: int = 22, height: int = 22) -> Opt
     """
     if not _HAS_PYOBJC:
         return None
+
+    percent = max(0.0, min(100.0, float(percent or 0.0)))
 
     from AppKit import NSImage, NSBezierPath, NSColor, NSMakeRect, NSMakeSize, \
         NSGraphicsContext
