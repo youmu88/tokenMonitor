@@ -246,6 +246,8 @@ def extract_model_stats_from_model_table(page_html):
         entry = {"name": full_name}
         if fee is not None:
             entry["used"] = fee  # 费用作为 used 字段（用于排序）
+            entry["is_fee"] = True  # 标记为费用数据（单位：元），非 token 数量
+            entry["is_fee"] = True  # 标记为费用数据（单位：元），非 token 数量
         if requests is not None:
             entry["requests"] = requests
         if total_tokens is not None:
@@ -780,6 +782,8 @@ def parse_token_value(text):
     从页面文本中解析 token/费用使用量。
     优先识别真实额度卡片中的金额格式，避免把提问内容、日期、分页里的 `6/3` 误判为配额。
     返回 (used, total, percentage) 或 None。
+    
+    v2.7: 保留金额小数精度，不再 int() 截断。
     """
     if not text:
         return None
@@ -803,7 +807,114 @@ def parse_token_value(text):
     total = MAX_TOKEN
     percentage = None
 
-    used_match = re.search(r'(?:已用|使用|已使用|调用次数|消耗)[：:]?\s*[¥$]?\s*([\d,]+(?:\.\d+)?)', text)
+    # ================================================================
+    # 策略1: 匹配金额格式 "¥862.06 / ¥4,060.00" 或 "已用 ¥862.06"
+    # ================================================================
+    # 匹配 "已用 ¥862.06" 或 "已用 ¥862.06 / ¥4,060.00"
+    money_used_match = re.search(r'已用\s*[¥$]\s*([\d,]+(?:\.\d+)?)', text)
+    if money_used_match:
+        used_str = money_used_match.group(1).replace(',', '')
+        used = float(used_str)
+        # 尝试匹配总额度
+        money_total_match = re.search(r'/\s*[¥$]\s*([\d,]+(?:\.\d+)?)', text)
+        if money_total_match:
+            total_str = money_total_match.group(1).replace(',', '')
+            total = float(total_str)
+        # 尝试匹配百分比 "已用 21.2%" 或 "21.2%"
+        pct_match = re.search(r'已用\s*([\d.]+)%', text)
+        if pct_match:
+            percentage = float(pct_match.group(1))
+        elif total > 0:
+            percentage = round(used / total * 100, 1)
+        # v2.7: 保留小数精度，不再 int() 截断
+        # 费用金额如 ¥1,380.46 应保留两位小数
+        used = round(used, 2)
+        total = round(total, 2)
+        return used, total, percentage
+
+
+def extract_token_usage_summary(page_text):
+    """
+    从页面文本中提取使用汇总数据（请求次数、输入 Tokens、输出 Tokens）。
+    
+    v2.7 新增：页面"使用汇总"区域包含：
+      请求次数    5,088
+      输入 Tokens    387,062,653
+      输出 Tokens    2,247,602
+      费用汇总    ¥1380.46
+    
+    返回 dict: {"requests": int, "input_tokens": int, "output_tokens": int}
+    或 None（未找到任何数据）。
+    """
+    result = {}
+    
+    # 匹配 "请求次数" 后的数字
+    req_match = re.search(r'请求次数\s*([\d,]+)', page_text)
+    if req_match:
+        result["requests"] = int(req_match.group(1).replace(',', ''))
+    
+    # 匹配 "输入 Tokens" 或 "输入 TOKENS" 后的数字
+    input_match = re.search(r'输入\s*[Tt]okens?\s*([\d,]+)', page_text)
+    if input_match:
+        result["input_tokens"] = int(input_match.group(1).replace(',', ''))
+    
+    # 匹配 "输出 Tokens" 或 "输出 TOKENS" 后的数字
+    output_match = re.search(r'输出\s*[Tt]okens?\s*([\d,]+)', page_text)
+    if output_match:
+        result["output_tokens"] = int(output_match.group(1).replace(',', ''))
+    
+    return result if result else None
+    """
+    从页面文本中智能解析 token 使用量。
+    支持两种格式：
+    1. 金额格式：¥862.06 / ¥4,060.00  已用 21.2%
+    2. 数字格式：862/4060  或  已用: 862  总量: 4060
+    返回 (used, total, percentage) 或 None。
+    
+    v2.7: 保留金额小数精度，不再 int() 截断。
+    """
+    used = None
+    total = MAX_TOKEN
+    percentage = None
+
+    # ================================================================
+    # 策略1: 匹配金额格式 "¥862.06 / ¥4,060.00" 或 "已用 ¥862.06"
+    # ================================================================
+    # 匹配 "已用 ¥862.06" 或 "已用 ¥862.06 / ¥4,060.00"
+    money_used_match = re.search(r'已用\s*[¥$]\s*([\d,]+(?:\.\d+)?)', text)
+    if money_used_match:
+        used_str = money_used_match.group(1).replace(',', '')
+        used = float(used_str)
+        # 尝试匹配总额度
+        money_total_match = re.search(r'/\s*[¥$]\s*([\d,]+(?:\.\d+)?)', text)
+        if money_total_match:
+            total_str = money_total_match.group(1).replace(',', '')
+            total = float(total_str)
+        # 尝试匹配百分比 "已用 21.2%" 或 "21.2%"
+        pct_match = re.search(r'已用\s*([\d.]+)%', text)
+        if pct_match:
+            percentage = float(pct_match.group(1))
+        elif total > 0:
+            percentage = round(used / total * 100, 1)
+        # v2.7: 保留小数精度，不再 int() 截断
+        # 费用金额如 ¥1,380.46 应保留两位小数
+        used = round(used, 2)
+        total = round(total, 2)
+        return used, total, percentage
+
+    # ================================================================
+    # 策略2: 匹配纯数字格式 "xxx/4060" 或 "xxx / 4060"
+    # ================================================================
+    ratio_match = re.search(r'(\d[\d,]*)\s*/\s*(\d[\d,]*)', text)
+    if ratio_match:
+        used = int(ratio_match.group(1).replace(',', ''))
+        total = int(ratio_match.group(2).replace(',', ''))
+        if total > 0:
+            percentage = round(used / total * 100, 1)
+        return used, total, percentage
+
+    # 尝试匹配 "已用: xxx" 或 "使用: xxx"
+    used_match = re.search(r'(?:已用|使用|已使用|调用次数|消耗)[：:]\s*([\d,]+)', text)
     if used_match:
         used = used_match.group(1).replace(',', '')
 
@@ -915,7 +1026,13 @@ async def fetch_quota_api_data(ctx):
 async def fetch_token_data(ctx):
     """
     从 token 页面抓取数据，返回结构化结果。
-    返回: dict with keys: success, used, total, percentage, raw_text, error
+    返回: dict with keys: success, used, total, percentage, raw_text, raw_html, error, model_stats, token_usage_summary
+    
+    v2.7 新增:
+    - raw_html: 完整页面 HTML（供外部二次解析）
+    - raw_text: 从 500 扩展到 2000 字符
+    - token_usage_summary: 使用汇总数据（请求次数、输入 Tokens、输出 Tokens）
+    - used/total 保留小数精度（不再 int() 截断）
     """
     page = None
     try:
@@ -1008,6 +1125,11 @@ async def fetch_token_data(ctx):
                     parse_source = "keyword_line"
                     break
 
+        # v2.7: 从页面文本中提取使用汇总数据（请求次数、输入 Tokens、输出 Tokens）
+        token_usage_summary = extract_token_usage_summary(page_text)
+        if token_usage_summary:
+            logger.info(f"📊 [v2.7] 从页面文本中提取到使用汇总数据: {token_usage_summary}")
+
         if result:
             used, total, percentage = result
             logger.info(f"Token 解析成功: source={parse_source}, used={used}, total={total}, percent={percentage}%")
@@ -1017,9 +1139,11 @@ async def fetch_token_data(ctx):
                 "total": total,
                 "percentage": percentage,
                 "parse_source": parse_source,
-                "raw_text": page_text[:500],
+                "raw_text": page_text[:2000],
+                "raw_html": page_html,
                 "title": await page.title(),
                 "model_stats": model_stats,
+                "token_usage_summary": token_usage_summary,
             }
         else:
             return {
@@ -1027,10 +1151,12 @@ async def fetch_token_data(ctx):
                 "used": None,
                 "total": MAX_TOKEN,
                 "percentage": None,
-                "raw_text": page_text[:500],
+                "raw_text": page_text[:2000],
+                "raw_html": page_html,
                 "title": await page.title(),
                 "warning": "未能解析出 token 数据，请检查页面结构",
                 "model_stats": model_stats,
+                "token_usage_summary": token_usage_summary,
             }
 
     except Exception as e:

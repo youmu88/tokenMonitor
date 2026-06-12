@@ -469,14 +469,35 @@ class TokenStatusApp(rumps.App):
         bar_chars = bar_fill * filled_count + bar_empty * empty_count
         self.title = f"Tokens: {used}/{total}({percent:.0f}%)"
 
-        # 2. 更新菜单项
+        # 2. 更新菜单项（必须在主线程执行，否则 NSMenu layout engine 会崩溃）
+        # BUGFIX: dispatch NSMenu 操作到主线程
         status_icon = "✅" if percent < 80 else ("⚠️" if percent < 90 else "🔴")
-        self._set_menu_title(0, f"{status_icon} Tokens: {used}/{total} ({percent:.1f}%) {bar_chars}")
+        self._safe_set_menu_title(0, f"{status_icon} Tokens: {used}/{total} ({percent:.1f}%) {bar_chars}")
 
         # 3. 更新历史数据缓存
         self._history_data = get_history_for_chart(hours=24)
-# 4. 刷新仪表盘
-        self._refresh_widget_display()
+# 4. 刷新仪表盘（必须在主线程执行）
+        self._safe_refresh_widget_display()
+
+    def _safe_set_menu_title(self, index, title):
+        """线程安全地设置菜单项标题（dispatch 到主线程执行）"""
+        # BUGFIX: NSMenu layout engine 必须在主线程操作，否则会 NSInternalInconsistencyException
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            self._set_menu_title(index, title)
+        else:
+            # 使用 rumps.Timer(0) 在主线程执行（rumps 的 timer callback 在主线程运行）
+            t = rumps.Timer(lambda _: self._set_menu_title(index, title), 0)
+            t.start()
+
+    def _safe_refresh_widget_display(self):
+        """线程安全地刷新仪表盘（dispatch 到主线程执行）"""
+        import threading
+        if threading.current_thread() is threading.main_thread():
+            self._refresh_widget_display()
+        else:
+            t = rumps.Timer(lambda _: self._refresh_widget_display(), 0)
+            t.start()
 
     def _set_menu_title(self, index, title):
         """安全地设置菜单项标题（兼容 rumps 的 menu 对象）"""

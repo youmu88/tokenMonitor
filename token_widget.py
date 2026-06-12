@@ -148,7 +148,11 @@ def build_card_model_stats(data: TokenWidgetData, top_n: int = 5) -> List[str]:
             bar = build_progress_bar(pct_calc, width=8)
             lines.append(f"  {i}. {name[:20]:<20} {bar} {used}/{total}")
         else:
-            lines.append(f"  {i}. {name[:20]:<20} {used:,} tokens")
+            # 判断是费用数据（元）还是 token 数量
+            if model.get("is_fee"):
+                lines.append(f"  {i}. {name[:20]:<20} ¥{used:,.2f}")
+            else:
+                lines.append(f"  {i}. {name[:20]:<20} {used:,} tokens")
 
     return lines
 
