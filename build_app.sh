@@ -9,7 +9,7 @@
 #
 # 打包产物:
 #   dist/TokenMonitor.app          # .app 捆绑包
-#   dist/TokenMonitor-1.0.0.dmg    # DMG 安装镜像（--dmg 时）
+#   dist/TokenMonitor-<VERSION>.dmg    # DMG 安装镜像（--dmg 时）
 # ============================================================
 
 set -e
@@ -19,7 +19,14 @@ cd "$SCRIPT_DIR"
 
 VENV_DIR="$SCRIPT_DIR/.venv"
 APP_NAME="TokenMonitor"
-VERSION="1.0.0"
+
+# 从 VERSION 文件读取版本号（统一版本管理）
+if [ -f "$SCRIPT_DIR/VERSION" ]; then
+    VERSION="1.2.0"$SCRIPT_DIR/VERSION" | tr -d ' \t\n\r')"
+else
+    VERSION="1.2.0"
+fi
+
 DIST_DIR="$SCRIPT_DIR/dist"
 BUILD_DIR="$SCRIPT_DIR/build"
 APP_BUNDLE="$DIST_DIR/$APP_NAME.app"

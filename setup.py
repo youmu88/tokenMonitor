@@ -12,10 +12,18 @@ Token Monitor - macOS 状态栏应用打包脚本
 
 import sys
 import os
+from pathlib import Path
 from setuptools import setup
 
 APP_NAME = "TokenMonitor"
 APP_SCRIPT = "token_status_app.py"
+
+# 从 VERSION 文件读取版本号（统一版本管理）
+_VERSION_FILE = Path(__file__).resolve().parent / "VERSION"
+if _VERSION_FILE.exists():
+    APP_VERSION = _VERSION_FILE.read_text().strip()
+else:
+    APP_VERSION = "1.2.0"
 
 # 应用资源文件（需要包含在 .app/Contents/Resources 中）
 RESOURCE_FILES = [
@@ -38,8 +46,8 @@ PLIST = {
     "CFBundleName": APP_NAME,
     "CFBundleDisplayName": "Token Monitor",
     "CFBundleIdentifier": "com.tokenmonitor.app",
-    "CFBundleVersion": "1.0.0",
-    "CFBundleShortVersionString": "1.0.0",
+    "CFBundleVersion": APP_VERSION,
+    "CFBundleShortVersionString": APP_VERSION,
     "CFBundleExecutable": APP_NAME,
     "LSUIElement": True,       # 无 Dock 图标（纯状态栏应用）
     "NSHighResolutionCapable": True,
@@ -102,7 +110,7 @@ OPTIONS = {
 
 setup(
     name=APP_NAME,
-    version="1.0.0",
+    version=APP_VERSION,
     description="Token 使用情况 macOS 状态栏监控应用",
     author="Token Monitor",
     app=[APP_SCRIPT],

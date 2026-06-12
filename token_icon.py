@@ -96,12 +96,12 @@ def create_progress_icon(percent: float, width: int = 22, height: int = 22) -> O
     bar_bg_color.set()
     bar_bg_path.fill()
     
-    # 根据使用率选择颜色
-    if percent >= 90:
+    # 根据使用率选择颜色（40%以下绿 / 40~60%黄 / 60~80%橙 / 80%+红）
+    if percent >= 80:
         bar_color = NSColor.redColor()
-    elif percent >= 75:
+    elif percent >= 60:
         bar_color = NSColor.orangeColor()
-    elif percent >= 50:
+    elif percent >= 40:
         bar_color = NSColor.yellowColor()
     else:
         bar_color = NSColor.greenColor()
@@ -174,9 +174,9 @@ def create_simple_icon(percent: float, width: int = 22, height: int = 22) -> Opt
             (center_x, center_y), radius - 1, start_angle, end_angle, False
         )
         
-        if percent >= 90:
+        if percent >= 80:
             arc_color = NSColor.redColor()
-        elif percent >= 75:
+        elif percent >= 60:
             arc_color = NSColor.orangeColor()
         elif percent >= 50:
             arc_color = NSColor.yellowColor()

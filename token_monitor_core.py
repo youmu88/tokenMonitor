@@ -113,6 +113,134 @@ def extract_table_data(page_html):
     return headers, rows
 
 
+def extract_model_stats_from_table(headers, rows):
+    """
+    从表格数据中提取模型使用量统计。
+    尝试识别包含模型名称、使用量、配额等信息的表格列。
+    
+    返回: List[Dict] 格式为 [{"name": ..., "used": ..., "total": ..., "percent": ...}]
+    """
+    model_stats = []
+    
+    if not headers or not rows:
+        return model_stats
+    
+    # 尝试识别列索引
+    name_idx = -1
+    used_idx = -1
+    total_idx = -1
+    percent_idx = -1
+    
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if any(kw in hl for kw in ["模型", "名称", "name", "model", "应用", "app"]):
+            name_idx = i
+        elif any(kw in hl for kw in ["已用", "使用量", "消耗", "用量", "used", "consumed", "usage"]):
+            used_idx = i
+        elif any(kw in hl for kw in ["总量", "配额", "限额", "总配额", "total", "quota", "limit", "capacity"]):
+            total_idx = i
+        elif any(kw in hl for kw in ["使用率", "占比", "百分比", "percent", "rate", "ratio"]):
+            percent_idx = i
+    
+    # 如果没找到明确的列名，尝试根据数据特征推断
+    if name_idx == -1 and rows:
+        # 第一列通常是名称
+        name_idx = 0
+    
+    for row in rows:
+        if len(row) < 2:
+            continue
+        
+        # 获取模型名称
+        name = ""
+        if name_idx >= 0 and name_idx < len(row):
+            name = row[name_idx].strip()
+        
+        if not name or len(name) < 2:
+            continue
+        
+        # 跳过表头行或汇总行
+        if any(kw in name.lower() for kw in ["合计", "总计", "汇总", "total", "sum", "全部"]):
+            continue
+        
+        entry = {"name": name}
+        
+        # 解析使用量
+        if used_idx >= 0 and used_idx < len(row):
+            val = parse_numeric_value(row[used_idx])
+            if val is not None:
+                entry["used"] = val
+        
+        # 解析总量
+        if total_idx >= 0 and total_idx < len(row):
+            val = parse_numeric_value(row[total_idx])
+            if val is not None:
+                entry["total"] = val
+        
+        # 解析百分比
+        if percent_idx >= 0 and percent_idx < len(row):
+            pct = parse_percentage_value(row[percent_idx])
+            if pct is not None:
+                entry["percent"] = pct
+        
+        # 如果没找到百分比但找到了 used 和 total，计算
+        if "percent" not in entry and "used" in entry and "total" in entry:
+            if entry["total"] > 0:
+                entry["percent"] = round(entry["used"] / entry["total"] * 100, 1)
+        
+        # 只保留有至少一个数值字段的条目
+        if "used" in entry or "total" in entry or "percent" in entry:
+            model_stats.append(entry)
+    
+    return model_stats
+
+
+def parse_numeric_value(text):
+    """从文本中解析数值（支持 K/M/B 单位、逗号分隔、¥符号）"""
+    if not text:
+        return None
+    
+    text = text.strip()
+    # 去除货币符号
+    text = re.sub(r'[¥$€£]', '', text)
+    
+    # 处理 K/M/B 单位
+    multiplier = 1
+    if re.search(r'[kK]', text):
+        multiplier = 1000
+        text = re.sub(r'[kK]', '', text)
+    elif re.search(r'[mM]', text):
+        multiplier = 1000000
+        text = re.sub(r'[mM]', '', text)
+    elif re.search(r'[bB]', text):
+        multiplier = 1000000000
+        text = re.sub(r'[bB]', '', text)
+    
+    # 提取数字
+    nums = re.findall(r'[\d,]+(?:\.\d+)?', text)
+    if nums:
+        try:
+            val = float(nums[0].replace(',', ''))
+            return int(val * multiplier)
+        except ValueError:
+            pass
+    return None
+
+
+def parse_percentage_value(text):
+    """从文本中解析百分比值"""
+    if not text:
+        return None
+    text = text.strip()
+    match = re.search(r'([\d.]+)\s*%', text)
+    if match:
+        try:
+            return float(match.group(1))
+        except ValueError:
+            pass
+    return None
+
+
 def extract_json_data(page_text):
     """尝试从页面中提取 JSON 格式的数据"""
     patterns = [
@@ -267,10 +395,13 @@ async def fetch_token_data(ctx):
         if json_data:
             result = parse_token_from_json(json_data)
 
-        # 2. 尝试表格解析
-        if not result:
-            headers, table_rows = extract_table_data(page_html)
-            if table_rows:
+        # 2. 尝试表格解析（同时提取模型统计数据）
+        model_stats = []
+        headers, table_rows = extract_table_data(page_html)
+        if table_rows:
+            # 从表格中提取模型使用量统计（无论 token 数据是否已解析，都执行）
+            model_stats = extract_model_stats_from_table(headers, table_rows)
+            if not result:
                 all_text = json.dumps(table_rows)
                 result = parse_token_value(all_text)
 
@@ -295,6 +426,7 @@ async def fetch_token_data(ctx):
                 "percentage": percentage,
                 "raw_text": page_text[:500],
                 "title": await page.title(),
+                "model_stats": model_stats,
             }
         else:
             return {
@@ -304,7 +436,8 @@ async def fetch_token_data(ctx):
                 "percentage": None,
                 "raw_text": page_text[:500],
                 "title": await page.title(),
-                "warning": "未能解析出 token 数据，请检查页面结构"
+                "warning": "未能解析出 token 数据，请检查页面结构",
+                "model_stats": model_stats,
             }
 
     except Exception as e:

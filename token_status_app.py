@@ -37,6 +37,7 @@ if APP_DIR not in sys.path:
 from token_monitor_core import TokenMonitorEngine, COOKIE_FILE, MAX_TOKEN, TARGET_URL, PROFILE_DIR
 from token_db import init_db, record_token_data, get_recent_history, get_history_for_chart, cleanup_old_data
 from token_icon import has_pyobjc, create_progress_icon, icon_to_rumps
+from token_widget import TokenWidgetManager, build_progress_bar
 
 # ============================================================
 # 配置
@@ -102,7 +103,10 @@ class TokenStatusApp(rumps.App):
         self._history_data = []
         self._consecutive_failures = 0  # 连续失败次数
         self._current_interval = REFRESH_INTERVAL  # 当前刷新间隔（秒）
-        self._current_interval_label = "3 分钟"  # 当前刷新间隔标签
+        self._current_interval_label = "3 分钟"
+# 仪表盘组件
+        self.widget = TokenWidgetManager(app_instance=self)
+        self.widget.set_mode("full")  # 默认完整模式  # 当前刷新间隔标签
 
         # 检测 PyObjC 是否可用
         self.use_native_icon = has_pyobjc()
@@ -165,8 +169,22 @@ class TokenStatusApp(rumps.App):
             item._interval_label = label
             interval_menu.add(item)
 
+        # 仪表盘子菜单（动态更新）
+        self._widget_menu = rumps.MenuItem("📊 Token 仪表盘", callback=None)
+        self._widget_menu.add(rumps.MenuItem("  🟢 加载中...", callback=None))
+        self._widget_menu.add(None)
+        # 模式切换子菜单
+        self._widget_mode_menu = rumps.MenuItem("🎨 切换模式", callback=None)
+        self._widget_mode_menu.add(rumps.MenuItem("✅ 精简 (1x1)", callback=self._set_widget_mode_compact))
+        self._widget_mode_menu.add(rumps.MenuItem("  标准 (+TopN)", callback=self._set_widget_mode_standard))
+        self._widget_mode_menu.add(rumps.MenuItem("  完整", callback=self._set_widget_mode_full))
+        self._widget_menu.add(self._widget_mode_menu)
+        # 自动模式切换
+        self._widget_menu.add(rumps.MenuItem("🤖 自动模式", callback=self._set_widget_auto_mode))
+
         self.menu = [
             rumps.MenuItem("📊 Tokens: 加载中...", callback=None),
+            self._widget_menu,
             None,  # 分隔线
             rumps.MenuItem("🔄 立即刷新", callback=self.refresh_now),
             rumps.MenuItem("📋 查看日志", callback=self.open_log),
@@ -267,6 +285,14 @@ class TokenStatusApp(rumps.App):
             self.last_error = None
             self.last_success_time = datetime.now()
             self._consecutive_failures = 0  # 重置连续失败计数
+
+            # 提取模型统计数据（如果有）
+            model_stats = result.get("model_stats", [])
+            if model_stats:
+                self._model_stats = model_stats
+                log.info(f"📊 提取到 {len(model_stats)} 个模型使用量数据")
+                # 同步更新 widget 的模型数据
+                self.widget.data.model_stats = model_stats
 
             # 记录到数据库
             record_token_data(used, total, percent, success=True)
@@ -370,7 +396,19 @@ class TokenStatusApp(rumps.App):
                     self.icon = rumps_icon
 
         # 状态栏标题（同时保留文本作为 fallback）
-        bar_chars = "█" * max(0, min(8, int(percent / 100 * 8))) + "░" * max(0, 8 - max(0, min(8, int(percent / 100 * 8))))
+        # 按消耗百分比着色：<40%绿 / 40~60%黄 / 60~80%橙 / 80%+红
+        if percent >= 80:
+            bar_fill = "🟥"
+        elif percent >= 60:
+            bar_fill = "🟧"
+        elif percent >= 40:
+            bar_fill = "🟨"
+        else:
+            bar_fill = "🟩"
+        bar_empty = "⬜"
+        filled_count = max(0, min(8, int(percent / 100 * 8)))
+        empty_count = 8 - filled_count
+        bar_chars = bar_fill * filled_count + bar_empty * empty_count
         self.title = f"Tokens: {used}/{total}({percent:.0f}%)"
 
         # 2. 更新菜单项
@@ -379,6 +417,8 @@ class TokenStatusApp(rumps.App):
 
         # 3. 更新历史数据缓存
         self._history_data = get_history_for_chart(hours=24)
+# 4. 刷新仪表盘
+        self._refresh_widget_display()
 
     def _set_menu_title(self, index, title):
         """安全地设置菜单项标题（兼容 rumps 的 menu 对象）"""
@@ -428,13 +468,92 @@ class TokenStatusApp(rumps.App):
             self.title += f" ({detail})"
 
     def _timer_tick(self, sender):
-        """定时器回调"""
-        if not self.monitoring:
-            self.monitoring = True
-            try:
-                threading.Thread(target=self._do_fetch, daemon=True).start()
-            finally:
-                self.monitoring = False
+        """定时器触发（保留给未来扩展）"""
+        pass
+
+    # ============================================================
+    # 仪表盘模式切换
+    # ============================================================
+
+    def _set_widget_mode_compact(self, sender):
+        """切换为精简模式（1x1）"""
+        self.widget.set_mode("compact")
+        self._update_widget_mode_menu()
+        self._refresh_widget_display()
+        log.info("📊 仪表盘模式切换为: 精简 (1x1)")
+
+    def _set_widget_mode_standard(self, sender):
+        """切换为标准模式（+TopN）"""
+        self.widget.set_mode("standard")
+        self._update_widget_mode_menu()
+        self._refresh_widget_display()
+        log.info("📊 仪表盘模式切换为: 标准 (+TopN)")
+
+    def _set_widget_mode_full(self, sender):
+        """切换为完整模式"""
+        self.widget.set_mode("full")
+        self._update_widget_mode_menu()
+        self._refresh_widget_display()
+        log.info("📊 仪表盘模式切换为: 完整")
+
+    def _set_widget_auto_mode(self, sender):
+        """切换自动模式"""
+        self.widget.set_auto_mode(not self.widget.auto_mode)
+        self._update_widget_mode_menu()
+        self._refresh_widget_display()
+        mode_label = "启用" if self.widget.auto_mode else "关闭"
+        log.info(f"📊 自动模式已{mode_label}")
+        rumps.notification(
+            title="Token 监控",
+            subtitle=f"📊 自动模式已{mode_label}",
+            message=f"当前使用率: {self.percent:.1f}% → 模式: {self.widget.mode}",
+        )
+
+    def _update_widget_mode_menu(self):
+        """更新模式切换菜单的勾选状态"""
+        mode = self.widget.mode
+        auto = self.widget.auto_mode
+        labels = {
+            "compact": "精简 (1x1)",
+            "standard": "标准 (+TopN)",
+            "full": "完整",
+        }
+        for item in self._widget_mode_menu:
+            for mode_name, label in labels.items():
+                if label in item.title:
+                    checked = "✅ " if mode == mode_name else "  "
+                    item.title = f"{checked}{label}"
+                    break
+
+        # 更新自动模式菜单项
+        auto_item = self._widget_menu.get("🤖 自动模式")
+        if auto_item:
+            auto_item.title = "✅ 🤖 自动模式" if auto else "🤖 自动模式"
+
+    def _refresh_widget_display(self):
+        """刷新仪表盘菜单显示"""
+        try:
+            # 获取当前数据
+            used = self.used
+            total = self.total
+            percent = self.percent
+            last_update = self.last_success_time
+
+            # 更新仪表盘数据
+            self.widget.update_data(used, total, percent, last_update)
+
+            # 如果有模型统计数据，也更新
+            if hasattr(self, '_model_stats') and self._model_stats:
+                self.widget.data.model_stats = self._model_stats
+
+            # 重建仪表盘菜单
+            menu_items = self.widget.build_menu_items()
+            self._widget_menu.clear()
+            for item in menu_items:
+                self._widget_menu.add(item)
+
+        except Exception as e:
+            log.error(f"❌ 刷新仪表盘失败: {e}")
 
     # ============================================================
     # 菜单回调
