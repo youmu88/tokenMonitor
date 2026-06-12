@@ -23,7 +23,7 @@ _VERSION_FILE = Path(__file__).resolve().parent / "VERSION"
 if _VERSION_FILE.exists():
     APP_VERSION = _VERSION_FILE.read_text().strip()
 else:
-    APP_VERSION = "1.2.0"
+    APP_VERSION = "1.2.1"
 
 # 应用资源文件（需要包含在 .app/Contents/Resources 中）
 RESOURCE_FILES = [
