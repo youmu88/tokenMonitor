@@ -14,6 +14,11 @@ v2.2 - 修复 py2app 打包后 playwright driver 路径问题：
 - py2app 将 playwright 包压缩到 python314.zip 中，导致 driver/node 无法作为可执行文件访问
 - 通过 monkey-patch playwright._impl._driver.compute_driver_executable，
   将 driver 路径指向 Resources 中的 driver 目录（而非 zip 内的路径）
+
+v2.3 - 修复 Top 模型无数据问题：
+- token.woa.com 页面使用现代前端框架渲染，DOM 中可能没有 <table> 标签
+- 新增 extract_model_stats_from_text() 从页面文本中直接提取模型数据
+- fetch_token_data() 中当表格解析无结果时，自动 fallback 到文本提取
 """
 
 # BUGFIX v2.2: 在 import playwright.async_api 之前，monkey-patch driver 路径
@@ -194,6 +199,137 @@ def extract_model_stats_from_table(headers, rows):
             model_stats.append(entry)
     
     return model_stats
+
+
+def extract_model_stats_from_text(page_text):
+    """
+    从页面文本中直接提取模型使用量统计（不依赖 HTML 表格结构）。
+    
+    token.woa.com 页面使用现代前端框架渲染，DOM 中可能没有 <table> 标签，
+    模型数据以文本形式存在于页面中。本函数通过模式匹配从文本中提取：
+    - 模型名称（如 GPT-4o, Claude-3.5-Sonnet 等）
+    - 使用量数值
+    - 配额/总量
+    - 使用率百分比
+    
+    返回: List[Dict] 格式为 [{"name": ..., "used": ..., "total": ..., "percent": ...}]
+    """
+    model_stats = []
+    
+    if not page_text:
+        return model_stats
+    
+    lines = page_text.split("\n")
+    
+    # 常见模型名称关键词（用于识别模型行）
+    model_keywords = [
+        "gpt", "claude", "gemini", "deepseek", "qwen", "llama", "mistral",
+        "glm", "chatglm", "baichuan", "yi-", "moonshot", "kimi", "minimax",
+        "ernie", "wenxin", "tongyi", "qianwen", "hunyuan", "doubao",
+        "spark", "xinghuo", "sensechat", "step-", "openai", "azure",
+        "模型", "model", "应用", "app",
+    ]
+    
+    # 先尝试找包含模型名称的行
+    candidate_lines = []
+    for line in lines:
+        line_lower = line.lower().strip()
+        # 检查是否包含模型关键词
+        has_model_kw = any(kw in line_lower for kw in model_keywords)
+        # 检查是否包含数值（使用量/配额）
+        has_number = bool(re.search(r'[\d,]+(?:\.\d+)?', line_lower))
+        if has_model_kw and has_number:
+            candidate_lines.append(line.strip())
+    
+    # 如果候选行太多（>50），说明匹配太宽泛，缩小范围
+    if len(candidate_lines) > 50:
+        # 更严格的筛选：行中必须同时包含模型关键词 + 数字 + 百分比或斜杠
+        candidate_lines = [
+            l for l in candidate_lines
+            if re.search(r'[\d.]+%', l) or re.search(r'\d+\s*/\s*\d+', l)
+        ]
+    
+    # 从候选行中提取模型数据
+    for line in candidate_lines:
+        # 清理 HTML 标签
+        clean = re.sub(r'<[^>]+>', '', line).strip()
+        if not clean or len(clean) < 5:
+            continue
+        
+        # 跳过明显不是模型数据的行
+        if any(kw in clean.lower() for kw in ["合计", "总计", "汇总", "total", "sum", "全部", "token", "配额"]):
+            continue
+        
+        # 提取模型名称：取行中第一个匹配模型关键词的单词/短语
+        name = None
+        for kw in model_keywords:
+            match = re.search(r'([A-Za-z0-9_\-.]+' + re.escape(kw) + r'[A-Za-z0-9_\-. ]*)', clean, re.IGNORECASE)
+            if match:
+                name = match.group(1).strip()
+                break
+        
+        if not name:
+            # 尝试更宽松的匹配：取行中第一个看起来像模型名的词（字母开头，含数字或连字符）
+            name_match = re.search(r'([A-Za-z][A-Za-z0-9_\-. /]+)', clean)
+            if name_match:
+                candidate = name_match.group(1).strip()
+                if len(candidate) >= 3 and not candidate.isdigit():
+                    name = candidate
+        
+        if not name or len(name) < 2:
+            continue
+        
+        # 解析使用量
+        used = None
+        total = None
+        percent = None
+        
+        # 尝试匹配 "xxx / yyy" 格式（使用量/总量）
+        ratio_match = re.search(r'(\d[\d,]*)\s*/\s*(\d[\d,]*)', clean)
+        if ratio_match:
+            used = int(ratio_match.group(1).replace(',', ''))
+            total = int(ratio_match.group(2).replace(',', ''))
+        
+        # 尝试匹配百分比 "xx.x%"
+        pct_match = re.search(r'([\d.]+)\s*%', clean)
+        if pct_match:
+            percent = float(pct_match.group(1))
+        
+        # 如果只有百分比没有 used/total，尝试从行中提取单个数值作为 used
+        if used is None and percent is None:
+            nums = re.findall(r'(\d[\d,]*)', clean)
+            if nums:
+                used = int(nums[0].replace(',', ''))
+        
+        # 如果只有 used 没有 total，使用默认总量
+        if used is not None and total is None:
+            total = MAX_TOKEN
+        
+        # 计算百分比
+        if percent is None and used is not None and total is not None and total > 0:
+            percent = round(used / total * 100, 1)
+        
+        # 只保留有足够信息的条目
+        if used is not None or percent is not None:
+            entry = {"name": name}
+            if used is not None:
+                entry["used"] = used
+            if total is not None:
+                entry["total"] = total
+            if percent is not None:
+                entry["percent"] = percent
+            model_stats.append(entry)
+    
+    # 去重（按名称去重，保留第一个出现的）
+    seen_names = set()
+    unique_stats = []
+    for entry in model_stats:
+        name_lower = entry["name"].lower()
+        if name_lower not in seen_names:
+            seen_names.add(name_lower)
+            unique_stats.append(entry)
+    
+    return unique_stats
 
 
 def parse_numeric_value(text):
@@ -498,7 +634,13 @@ async def fetch_token_data(ctx):
                 all_text = json.dumps(table_rows)
                 result = parse_token_value(all_text)
 
-        # 3. 尝试文本解析
+        # 3. 如果表格解析没有模型数据，尝试从页面文本中直接提取（v2.3 新增）
+        if not model_stats:
+            model_stats = extract_model_stats_from_text(page_text)
+            if model_stats:
+                logger.info(f"📊 [v2.3] 从页面文本中提取到 {len(model_stats)} 个模型使用量数据")
+
+        # 4. 尝试文本解析
         if not result:
             result = parse_token_value(page_text)
             if result:
@@ -511,6 +653,7 @@ async def fetch_token_data(ctx):
                 if result:
                     parse_source = "json"
 
+        # 5. 尝试文本行逐行解析
         if not result:
             text_data = extract_token_data(page_text)
             for line in text_data:
