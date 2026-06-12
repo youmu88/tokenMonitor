@@ -22,9 +22,9 @@ APP_NAME="TokenMonitor"
 
 # 从 VERSION 文件读取版本号（统一版本管理）
 if [ -f "$SCRIPT_DIR/VERSION" ]; then
-    VERSION="1.2.1"$SCRIPT_DIR/VERSION" | tr -d ' \t\n\r')"
+    VERSION="1.2.2"$SCRIPT_DIR/VERSION" | tr -d ' \t\n\r')"
 else
-    VERSION="1.2.1"
+    VERSION="1.2.2"
 fi
 
 DIST_DIR="$SCRIPT_DIR/dist"
