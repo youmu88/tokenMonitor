@@ -553,14 +553,25 @@ class TokenStatusApp(rumps.App):
             new_menu = rumps.MenuItem("📊 Token 仪表盘", callback=None)
             for item in menu_items:
                 new_menu.add(item)
+
             # 找到 _widget_menu 在父菜单中的位置并替换
             parent = self._widget_menu._menuitem.menu()
-            if parent:
+            if parent is not None:
                 index = parent.indexOfItem_(self._widget_menu._menuitem)
                 if index != -1:
                     parent.removeItemAtIndex_(index)
                     parent.insertItem_atIndex_(new_menu._menuitem, index)
-            self._widget_menu = new_menu
+                    self._widget_menu = new_menu
+                    return
+
+            # ⚠️ BUGFIX: 启动早期 parent 可能为 None（NSMenu 尚未初始化完成），
+            # 此时不替换 _widget_menu 引用，而是直接更新现有菜单项的内容
+            # 避免 _widget_menu 指向未挂载的 MenuItem 导致点击卡死
+            log.debug("⚠️ 仪表盘父菜单尚未初始化，跳过替换，直接更新现有菜单项")
+            # 清空并重新填充现有 _widget_menu
+            self._widget_menu.clear()
+            for item in menu_items:
+                self._widget_menu.add(item)
 
         except Exception as e:
             log.error(f"❌ 刷新仪表盘失败: {e}")

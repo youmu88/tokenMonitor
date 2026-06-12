@@ -236,7 +236,9 @@ def extract_model_stats_from_text(page_text):
         "spark", "xinghuo", "sensechat", "step-", "openai", "azure",
         "模型", "model", "应用", "app",
         # 补充 token.woa.com 实际页面中出现的模型名关键词
-        "cron", "internal", "opus", "sonnet", "haiku", "o1", "o3",
+        # ⚠️ 注意：不要添加非模型关键词（如 "cron"、"internal"），
+        # 否则会将页面中的定时任务/内部使用等文本误识别为模型数据
+        "opus", "sonnet", "haiku", "o1", "o3",
         "mini", "pro", "flash", "turbo", "reka", "command", "cohere",
         "nova", "lite", "medium", "large", "xlarge",
     ]
