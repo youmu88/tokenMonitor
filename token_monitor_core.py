@@ -124,6 +124,141 @@ def extract_table_data(page_html):
     return headers, rows
 
 
+def extract_model_stats_from_model_table(page_html):
+    """
+    从模型使用汇总表格 (model-summary-table) 中提取模型使用量统计。
+    
+    token.woa.com 页面包含两个表格：
+    - product-summary-table: 产品维度汇总（产品 | 请求次数 | 输入Tokens | 输出Tokens | 总Tokens | 费用）
+    - model-summary-table: 模型维度汇总（模型 | 版本 | 请求次数 | 输入Tokens | 输出Tokens | 总Tokens | 费用）
+    
+    本函数专门解析 model-summary-table，提取模型名称+版本+费用，
+    按费用降序排列，返回 Top 5 模型。
+    
+    返回: List[Dict] 格式为 [{"name": "模型名-版本", "used": 费用数值, "total": None, "percent": None}]
+    """
+    model_stats = []
+    
+    # 查找 model-summary-table
+    table_match = re.search(
+        r'<table[^>]*class="[^"]*summary-table\s+model-summary-table[^"]*"[^>]*>(.*?)</table>',
+        page_html, re.DOTALL
+    )
+    if not table_match:
+        # 回退：查找包含"模型"和"版本"表头的表格
+        tables = re.findall(r'<table[^>]*>(.*?)</table>', page_html, re.DOTALL)
+        for table_html in tables:
+            ths = re.findall(r'<th[^>]*>(.*?)</th>', table_html, re.DOTALL)
+            header_texts = [re.sub(r'<[^>]+>', '', h).strip().lower() for h in ths]
+            if '模型' in header_texts and '版本' in header_texts:
+                table_match = type('obj', (object,), {'group': lambda self, x: table_html})()
+                break
+    
+    if not table_match:
+        return model_stats
+    
+    table_html = table_match.group(1)
+    
+    # 提取表头
+    ths = re.findall(r'<th[^>]*>(.*?)</th>', table_html, re.DOTALL)
+    headers = [re.sub(r'<[^>]+>', '', h).strip() for h in ths]
+    
+    # 识别列索引
+    model_idx = -1
+    version_idx = -1
+    fee_idx = -1
+    req_idx = -1
+    input_token_idx = -1
+    output_token_idx = -1
+    total_token_idx = -1
+    
+    for i, h in enumerate(headers):
+        hl = h.lower()
+        if hl == '模型' or hl.startswith('模型'):
+            model_idx = i
+        elif hl == '版本' or hl.startswith('版本'):
+            version_idx = i
+        elif hl.startswith('费用') or '费用' in hl:
+            fee_idx = i
+        elif hl == '请求次数' or hl.startswith('请求'):
+            req_idx = i
+        elif '输入' in hl and 'token' in hl:
+            input_token_idx = i
+        elif '输出' in hl and 'token' in hl:
+            output_token_idx = i
+        elif hl.startswith('总') and 'token' in hl:
+            total_token_idx = i
+    
+    if model_idx == -1:
+        return model_stats
+    
+    # 提取数据行
+    trs = re.findall(r'<tr[^>]*>(.*?)</tr>', table_html, re.DOTALL)
+    for tr in trs:
+        tds = re.findall(r'<td[^>]*>(.*?)</td>', tr, re.DOTALL)
+        if not tds:
+            continue
+        
+        # 提取模型名称（取 title 属性，更精确）
+        model_name = ""
+        if model_idx < len(tds):
+            title_match = re.search(r'title="([^"]*)"', tds[model_idx])
+            if title_match:
+                model_name = title_match.group(1).strip()
+            else:
+                model_name = re.sub(r'<[^>]+>', '', tds[model_idx]).strip()
+        
+        if not model_name or len(model_name) < 2:
+            continue
+        
+        # 提取版本
+        version = ""
+        if version_idx >= 0 and version_idx < len(tds):
+            title_match = re.search(r'title="([^"]*)"', tds[version_idx])
+            if title_match:
+                version = title_match.group(1).strip()
+            else:
+                version = re.sub(r'<[^>]+>', '', tds[version_idx]).strip()
+        
+        # 组合模型名称：版本通常已包含模型名（如"GLM-5.1"），直接使用版本
+        # 如果版本为空，则使用模型名
+        full_name = version if version else model_name
+        
+        # 提取费用（保留小数）
+        fee = None
+        if fee_idx >= 0 and fee_idx < len(tds):
+            fee_text = re.sub(r'<[^>]+>', '', tds[fee_idx]).strip()
+            fee = parse_numeric_value(fee_text, keep_float=True)
+        
+        # 提取请求次数
+        requests = None
+        if req_idx >= 0 and req_idx < len(tds):
+            req_text = re.sub(r'<[^>]+>', '', tds[req_idx]).strip()
+            requests = parse_numeric_value(req_text)
+        
+        # 提取总 Tokens
+        total_tokens = None
+        if total_token_idx >= 0 and total_token_idx < len(tds):
+            tt_text = re.sub(r'<[^>]+>', '', tds[total_token_idx]).strip()
+            total_tokens = parse_numeric_value(tt_text)
+        
+        entry = {"name": full_name}
+        if fee is not None:
+            entry["used"] = fee  # 费用作为 used 字段（用于排序）
+        if requests is not None:
+            entry["requests"] = requests
+        if total_tokens is not None:
+            entry["total_tokens"] = total_tokens
+        
+        model_stats.append(entry)
+    
+    # 按费用降序排列，取 Top 5
+    model_stats.sort(key=lambda x: x.get("used", 0) or 0, reverse=True)
+    model_stats = model_stats[:5]
+    
+    return model_stats
+
+
 def extract_model_stats_from_table(headers, rows):
     """
     从表格数据中提取模型使用量统计。
@@ -374,8 +509,13 @@ def extract_model_stats_from_text(page_text):
     return unique_stats
 
 
-def parse_numeric_value(text):
-    """从文本中解析数值（支持 K/M/B 单位、逗号分隔、¥符号）"""
+def parse_numeric_value(text, keep_float=False):
+    """从文本中解析数值（支持 K/M/B 单位、逗号分隔、¥符号）
+    
+    Args:
+        text: 要解析的文本
+        keep_float: 如果为 True，返回 float（用于费用等小数场景）；否则返回 int（默认）
+    """
     if not text:
         return None
     
@@ -400,7 +540,8 @@ def parse_numeric_value(text):
     if nums:
         try:
             val = float(nums[0].replace(',', ''))
-            return int(val * multiplier)
+            result = val * multiplier
+            return result if keep_float else int(result)
         except ValueError:
             pass
     return None
@@ -732,14 +873,21 @@ async def fetch_token_data(ctx):
                 all_text = json.dumps(table_rows)
                 result = parse_token_value(all_text)
 
-        # 3. 尝试从 __NEXT_DATA__ JSON 中提取模型数据（v2.4 新增）
+        # 3. 优先从模型使用汇总表格 (model-summary-table) 中提取模型数据（v2.6 新增）
+        #    页面包含两个表格：产品汇总和模型汇总，模型汇总表格有"模型"+"版本"列
+        if not model_stats:
+            model_stats = extract_model_stats_from_model_table(page_html)
+            if model_stats:
+                logger.info(f"📊 [v2.6] 从模型使用汇总表格中提取到 {len(model_stats)} 个模型使用量数据")
+
+        # 4. 尝试从 __NEXT_DATA__ JSON 中提取模型数据（v2.4 新增）
         #    优先于文本解析，因为 JSON 数据更精确
         if not model_stats:
             model_stats = extract_model_stats_from_next_data(page_html)
             if model_stats:
                 logger.info(f"📊 [v2.4] 从 __NEXT_DATA__ JSON 中提取到 {len(model_stats)} 个模型使用量数据")
 
-        # 4. 如果 JSON 解析没有模型数据，尝试从页面文本中直接提取（v2.3 新增）
+        # 5. 如果 JSON 解析没有模型数据，尝试从页面文本中直接提取（v2.3 新增）
         if not model_stats:
             model_stats = extract_model_stats_from_text(page_text)
             if model_stats:
